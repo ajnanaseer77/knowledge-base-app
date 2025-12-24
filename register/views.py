@@ -1,21 +1,39 @@
 import json
+from functools import wraps
 from django.http import JsonResponse
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
-from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db.models import Q
+from .models import Note, Category, AuthToken
 
-from .models import Note, Category
 
+def token_required(view_func):
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        token = request.META.get("HTTP_AUTHORIZATION", "") \
+            .replace("Bearer ", "") \
+            .replace("Token ", "")
 
+        if not token:
+            return JsonResponse({"error": "Token is required"}, status=401)
+
+        try:
+            auth_token = AuthToken.objects.get(token=token)
+            request.user = auth_token.user
+        except AuthToken.DoesNotExist:
+            return JsonResponse({"error": "Invalid token"}, status=401)
+
+        return view_func(request, *args, **kwargs)
+
+    return wrapper
 
 @csrf_exempt
 def register_user(request):
     if request.method != "POST":
-        return JsonResponse({"message": "Send POST request with username and password"})
+        return JsonResponse({"error": "POST request required"}, status=405)
 
     data = json.loads(request.body)
     username = data.get("username")
@@ -27,13 +45,13 @@ def register_user(request):
     if User.objects.filter(username=username).exists():
         return JsonResponse({"error": "Username already exists"}, status=400)
 
-    user = User.objects.create_user(username=username, password=password)
+    User.objects.create_user(username=username, password=password)
     return JsonResponse({"message": "User registered successfully"})
 
 @csrf_exempt
 def login_user(request):
     if request.method != "POST":
-        return JsonResponse({"message": "Send POST request with username and password"})
+        return JsonResponse({"error": "POST request required"}, status=405)
 
     data = json.loads(request.body)
     user = authenticate(
@@ -42,20 +60,15 @@ def login_user(request):
     )
 
     if not user:
-        return JsonResponse({"error": "Invalid credentials"}, status=400)
+        return JsonResponse({"error": "Invalid credentials"}, status=401)
 
-    login(request, user)
-    return JsonResponse({"message": "Login successful"})
+    token, _ = AuthToken.objects.get_or_create(user=user)
+    return JsonResponse({"token": token.token})
 
+@method_decorator(csrf_exempt, name="dispatch")
+class CreateNoteView(View):
 
-def logout_user(request):
-    logout(request)
-    return JsonResponse({"message": "Logged out successfully"})
-
-
-
-@method_decorator(csrf_exempt, name='dispatch')
-class CreateNoteView(LoginRequiredMixin, View):
+    @method_decorator(token_required)
     def post(self, request):
         data = json.loads(request.body)
 
@@ -65,11 +78,15 @@ class CreateNoteView(LoginRequiredMixin, View):
             user=request.user
         )
 
-        return JsonResponse({"message": "Note created", "id": note.id}, status=201)
-        
-        
-@method_decorator(csrf_exempt, name='dispatch')
-class UpdateNoteView(LoginRequiredMixin, View):
+        return JsonResponse(
+            {"message": "Note created", "id": note.id},
+            status=201
+        )
+
+@method_decorator(csrf_exempt, name="dispatch")
+class UpdateNoteView(View):
+
+    @method_decorator(token_required)
     def put(self, request, pk):
         note = Note.objects.filter(id=pk, user=request.user).first()
         if not note:
@@ -81,10 +98,12 @@ class UpdateNoteView(LoginRequiredMixin, View):
         note.save()
 
         return JsonResponse({"message": "Note updated"})
-    
-    
-@method_decorator(csrf_exempt, name='dispatch')
-class DeleteNoteView(LoginRequiredMixin, View):
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class DeleteNoteView(View):
+
+    @method_decorator(token_required)
     def delete(self, request, pk):
         note = Note.objects.filter(id=pk, user=request.user).first()
         if not note:
@@ -93,9 +112,9 @@ class DeleteNoteView(LoginRequiredMixin, View):
         note.delete()
         return JsonResponse({"message": "Note deleted"})
 
-    
+class ListNotesView(View):
 
-class ListNotesView(LoginRequiredMixin, View):
+    @method_decorator(token_required)
     def get(self, request):
         notes = [
             {
@@ -109,9 +128,9 @@ class ListNotesView(LoginRequiredMixin, View):
         ]
         return JsonResponse(notes, safe=False)
 
-    
+class ViewNoteView(View):
 
-class ViewNoteView(LoginRequiredMixin, View):
+    @method_decorator(token_required)
     def get(self, request, pk):
         note = Note.objects.filter(id=pk, user=request.user).first()
         if not note:
@@ -124,22 +143,27 @@ class ViewNoteView(LoginRequiredMixin, View):
             "category": note.category.name if note.category else None,
             "is_favorite": note.is_favorite
         })
-    
 
+@method_decorator(csrf_exempt, name="dispatch")
+class CreateCategoryView(View):
 
-@method_decorator(csrf_exempt, name='dispatch')
-class CreateCategoryView(LoginRequiredMixin, View):
+    @method_decorator(token_required)
     def post(self, request):
         data = json.loads(request.body)
+
         category = Category.objects.create(
             name=data.get("name"),
             user=request.user
         )
-        return JsonResponse({"message": "Category created", "id": category.id})
 
+        return JsonResponse(
+            {"message": "Category created", "id": category.id}
+        )
 
-@method_decorator(csrf_exempt, name='dispatch')
-class AssignCategoryView(LoginRequiredMixin, View):
+@method_decorator(csrf_exempt, name="dispatch")
+class AssignCategoryView(View):
+
+    @method_decorator(token_required)
     def put(self, request, note_id):
         data = json.loads(request.body)
 
@@ -156,23 +180,11 @@ class AssignCategoryView(LoginRequiredMixin, View):
         note.save()
 
         return JsonResponse({"message": "Category assigned"})
-    
-    
-class SearchNotesView(LoginRequiredMixin, View):
-    def get(self, request):
-        q = request.GET.get("q", "")
-        notes = Note.objects.filter(
-            user=request.user
-        ).filter(Q(title__icontains=q) | Q(content__icontains=q) | Q(category__name__icontains=q))
 
-        return JsonResponse(
-            [{"id": n.id, "title": n.title, "category": n.category.name if n.category else None} for n in notes],
-            safe=False
-        )
+@method_decorator(csrf_exempt, name="dispatch")
+class ToggleFavoriteView(View):
 
-
-@method_decorator(csrf_exempt, name='dispatch')
-class ToggleFavoriteView(LoginRequiredMixin, View):
+    @method_decorator(token_required)
     def post(self, request, pk):
         note = Note.objects.filter(id=pk, user=request.user).first()
         if not note:
@@ -182,3 +194,22 @@ class ToggleFavoriteView(LoginRequiredMixin, View):
         note.save()
 
         return JsonResponse({"favorite": note.is_favorite})
+
+class SearchNotesView(View):
+
+    @method_decorator(token_required)
+    def get(self, request):
+        q = request.GET.get("q", "")
+        notes = Note.objects.filter(
+            user=request.user
+        ).filter(
+            Q(title__icontains=q) |
+            Q(content__icontains=q) |
+            Q(category__name__icontains=q)
+        )
+
+        return JsonResponse(
+            [{"id": n.id, "title": n.title,"content": n.content} for n in notes],
+            safe=False
+        )
+
