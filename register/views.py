@@ -14,24 +14,28 @@ from django.db.models import Q
 from .models import Note, Category
 
 User = get_user_model()
-
-
-def generate_jwt(user):
+def generate_access_token(user):
     payload = {
         "user_id": user.id,
-        "username": user.username,
-        "exp": datetime.utcnow() + timedelta(seconds=settings.JWT_EXP_DELTA_SECONDS)
+        "type": "access",
+        "exp": datetime.utcnow() + timedelta(minutes=15)
     }
-    token = jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
-    return token
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
+
+
+def generate_refresh_token(user):
+    payload = {
+        "user_id": user.id,
+        "type": "refresh",
+        "exp": datetime.utcnow() + timedelta(days=7)
+    }
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 def decode_jwt(token):
     try:
-        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
-        return payload
+        return jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         return None
-
 
 
 def jwt_token_required(view_func):
@@ -39,17 +43,22 @@ def jwt_token_required(view_func):
     def wrapper(request, *args, **kwargs):
         auth_header = request.META.get("HTTP_AUTHORIZATION", "")
         token = auth_header.replace("Bearer ", "")
+
         if not token:
-            return JsonResponse({"error": "Token is required"}, status=401)
+            return JsonResponse({"error": "Access token required"}, status=401)
+
         payload = decode_jwt(token)
-        if not payload:
-            return JsonResponse({"error": "Invalid or expired token"}, status=401)
+
+        if not payload or payload.get("type") != "access":
+            return JsonResponse({"error": "Invalid or expired access token"}, status=401)
+
         try:
-            user = User.objects.get(id=payload['user_id'])
-            request.user = user
+            request.user = User.objects.get(id=payload["user_id"])
         except User.DoesNotExist:
             return JsonResponse({"error": "User not found"}, status=401)
+
         return view_func(request, *args, **kwargs)
+
     return wrapper
 
 
@@ -57,13 +66,17 @@ def jwt_token_required(view_func):
 def register_user(request):
     if request.method != "POST":
         return JsonResponse({"error": "POST request required"}, status=405)
+
     data = json.loads(request.body)
     username = data.get("username")
     password = data.get("password")
+
     if not username or not password:
         return JsonResponse({"error": "Username and password required"}, status=400)
+
     if User.objects.filter(username=username).exists():
         return JsonResponse({"error": "Username already exists"}, status=400)
+
     User.objects.create_user(username=username, password=password)
     return JsonResponse({"message": "User registered successfully"})
 
@@ -71,12 +84,49 @@ def register_user(request):
 def login_user(request):
     if request.method != "POST":
         return JsonResponse({"error": "POST request required"}, status=405)
+
     data = json.loads(request.body)
-    user = authenticate(username=data.get("username"), password=data.get("password"))
+    user = authenticate(
+        username=data.get("username"),
+        password=data.get("password")
+    )
+
     if not user:
         return JsonResponse({"error": "Invalid credentials"}, status=401)
-    token = generate_jwt(user)
-    return JsonResponse({"token": token})
+
+    return JsonResponse({
+        "access_token": generate_access_token(user),
+        "refresh_token": generate_refresh_token(user)
+    })
+
+@csrf_exempt
+def refresh_access_token(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST request required"}, status=405)
+
+    data = json.loads(request.body)
+    refresh_token = data.get("refresh_token")
+
+    if not refresh_token:
+        return JsonResponse({"error": "Refresh token required"}, status=400)
+
+    payload = decode_jwt(refresh_token)
+
+    if not payload or payload.get("type") != "refresh":
+        return JsonResponse({"error": "Invalid or expired refresh token"}, status=401)
+
+    try:
+        user = User.objects.get(id=payload["user_id"])
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=401)
+
+    return JsonResponse({
+        "access_token": generate_access_token(user)
+    })
+
+
+
+
 
 
 @method_decorator(csrf_exempt, name="dispatch")
