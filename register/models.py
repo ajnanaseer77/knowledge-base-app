@@ -1,11 +1,11 @@
 import uuid
 from django.db import models
-from django.contrib.auth.models import User
+from django.conf import settings
 
 
 class Category(models.Model):
     user = models.ForeignKey(
-        User,
+        settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="categories"
     )
@@ -14,7 +14,10 @@ class Category(models.Model):
 
     class Meta:
         verbose_name_plural = "Categories"
-        unique_together = ("user", "name")  
+        unique_together = ("user", "name")
+        permissions = [
+            ("can_create_category", "Can create category"),
+        ]
 
     def __str__(self):
         return self.name
@@ -22,31 +25,30 @@ class Category(models.Model):
 
 class Note(models.Model):
     user = models.ForeignKey(
-        User,
+        settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="notes"
     )
-    title = models.CharField(max_length=200)
+    title = models.CharField(max_length=255)
     content = models.TextField()
-
     category = models.ForeignKey(
         Category,
-        on_delete=models.SET_NULL,
         null=True,
         blank=True,
+        on_delete=models.SET_NULL,
         related_name="notes"
     )
-
     is_favorite = models.BooleanField(default=False)
-
     created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        permissions = [
+            ("can_create_note", "Can create note"),
+            ("can_update_note", "Can update note"),
+            ("can_delete_note", "Can delete note"),
+            ("can_create_category", "Can create category"),
+        ]
         ordering = ["-created_at"]
 
     def __str__(self):
         return self.title
-
-
-
